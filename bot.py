@@ -124,9 +124,16 @@ def main():
     # 3) De-dupe + post newest first
     seen = load_state()
     print(f"[STATE] Seen URLs: {len(seen)}")
-    # reverse so newest (top of section) goes first
-    items = list(dict(items))  # quick de-dupe but keep order from scrape
-    items_to_post = [(t, u) for (t, u) in items if u not in seen]
+
+    # Robust de-dupe preserving order by URL
+    uniq = []
+    seen_urls = set()
+    for title, url in items:
+        if url not in seen_urls:
+            uniq.append((title, url))
+            seen_urls.add(url)
+
+    items_to_post = [(t, u) for (t, u) in uniq if u not in seen]
 
     if not items_to_post:
         print("No new items to post (already seen).")
