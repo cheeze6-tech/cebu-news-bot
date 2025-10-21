@@ -235,7 +235,7 @@ def main():
 
     posted = 0
     for it in to_post:
-        post_title = (TITLE_PREFIX + it["title"])[:290]
+        post_title = it["title"][:290]
         try:
             submission = sub.submit(title=post_title, url=it["url"], resubmit=False)
             if FLAIR_ID:
