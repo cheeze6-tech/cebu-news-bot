@@ -2,24 +2,18 @@ import os, time, json, re, sys, html
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
-import feedparser
 import praw
 from difflib import SequenceMatcher
 
 SUBREDDIT = "CebuPolitics"
 
 # Sources
-FREEMAN_RSS = "https://www.philstar.com/rss/the-freeman"
-FREEMAN_CEBU = "https://www.philstar.com/the-freeman/cebu-news"
 SUNSTAR_LOCAL = "https://www.sunstar.com.ph/cebu/local-news"
 CDN_LATEST   = "https://cebudailynews.inquirer.net/category/latest-news"
 
-TITLE_PREFIX = "📰 Cebu News — "
-FLAIR_TEXT = "Cebu News"
+FLAIR_TEXT = "Local News"
 FLAIR_ID = None
-
 STATE_FILE = Path("posted.json")
-LINK_FILTER_FREEMAN = re.compile(r"philstar\.com/the-freeman/cebu-news/", re.IGNORECASE)
 
 REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
@@ -54,7 +48,6 @@ def token_set(s: str) -> set:
     return set([w for w in norm_title(s).split() if w and len(w) > 2])
 
 def near_duplicate(a: str, b: str) -> bool:
-    """Return True if titles are likely the same story."""
     na, nb = norm_title(a), norm_title(b)
     if not na or not nb:
         return False
@@ -69,19 +62,11 @@ def near_duplicate(a: str, b: str) -> bool:
     return ratio >= 0.82
 
 def dedupe_by_similarity(items):
-    """items: list of dicts with keys: title, url, source."""
     kept = []
     for it in items:
-        dup = False
-        for k in kept:
-            if near_duplicate(it["title"], k["title"]):
-                dup = True
-                break
-        if not dup:
+        if not any(near_duplicate(it["title"], k["title"]) for k in kept):
             kept.append(it)
     return kept
-
-# ---------- Scrapers ----------
 
 def fetch(url):
     headers = {"User-Agent": REDDIT_USER_AGENT}
@@ -89,46 +74,13 @@ def fetch(url):
     r.raise_for_status()
     return r.text
 
-def scrape_freeman_cebu():
-    print(f"[FREEMAN] GET {FREEMAN_CEBU}")
-    html_text = fetch(FREEMAN_CEBU)
-    soup = BeautifulSoup(html_text, "html.parser")
-    out = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/"):
-            href = "https://www.philstar.com" + href
-        if LINK_FILTER_FREEMAN.search(href):
-            title = a.get_text(strip=True)
-            if title and len(title) > 6:
-                out.append({"title": title, "url": href, "source": "The Freeman"})
-    # fallback to RSS filter
-    if not out:
-        print("[FREEMAN] Page returned 0; trying RSS fallback")
-        feed = feedparser.parse(FREEMAN_RSS)
-        for e in getattr(feed, "entries", []):
-            link = getattr(e, "link", "")
-            title = getattr(e, "title", "").strip()
-            if LINK_FILTER_FREEMAN.search(link) and title:
-                out.append({"title": title, "url": link, "source": "The Freeman"})
-    print(f"[FREEMAN] Found {len(out)}")
-    return out
+# ---------- Scrapers ----------
 
 def scrape_sunstar_local():
     print(f"[SUNSTAR] GET {SUNSTAR_LOCAL}")
     html_text = fetch(SUNSTAR_LOCAL)
     soup = BeautifulSoup(html_text, "html.parser")
     out = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.startswith("/"):
-            href = "https://www.sunstar.com.ph" + href
-        # Limit to Cebu section links
-        if "sunstar.com.ph/cebu" in href and "/local-news" not in href:
-            title = a.get_text(strip=True)
-            if title and len(title) > 6:
-                out.append({"title": title, "url": href, "source": "SunStar Cebu"})
-    # Also include the actual Local News listing anchors
     for h in soup.select("h2 a, h3 a"):
         href = h.get("href")
         if not href:
@@ -139,7 +91,7 @@ def scrape_sunstar_local():
             title = h.get_text(strip=True)
             if title and len(title) > 6:
                 out.append({"title": title, "url": href, "source": "SunStar Cebu"})
-    # light de-dupe by URL
+    # de-dupe by URL
     seen = set()
     uniq = []
     for it in out:
@@ -157,7 +109,6 @@ def scrape_cdn_latest():
         href = a["href"]
         if href.startswith("/"):
             href = "https://cebudailynews.inquirer.net" + href
-        # keep only CDN site articles (avoid external & tag noise)
         if "cebudailynews.inquirer.net" in href and any(seg in href for seg in ["/202", "/latest-news/","/news/","/cebu"]):
             title = a.get_text(strip=True)
             if title and len(title) > 6 and not title.lower().startswith(("read more","watch","listen")):
@@ -176,25 +127,22 @@ def main():
     print("=== Cebu News Bot start ===")
     print(f"Target subreddit: r/{SUBREDDIT}")
 
-    # 1) Gather from all sources (order = preference kept if dup)
+    # Gather from both sources
     items = []
-    try:    items += scrape_freeman_cebu()
-    except Exception as e: print(f"[FREEMAN][ERR] {e}")
-    try:    items += scrape_sunstar_local()
+    try: items += scrape_sunstar_local()
     except Exception as e: print(f"[SUNSTAR][ERR] {e}")
-    try:    items += scrape_cdn_latest()
+    try: items += scrape_cdn_latest()
     except Exception as e: print(f"[CDN][ERR] {e}")
 
     if not items:
-        print("No items found from any source this run.")
+        print("No items found from either source this run.")
         return
 
-    # 2) Cross-source similarity de-dupe
     print(f"[AGG] Total before de-dupe: {len(items)}")
     items = dedupe_by_similarity(items)
     print(f"[AGG] After cross-source de-dupe: {len(items)}")
 
-    # 3) Reddit auth
+    # Reddit auth
     try:
         reddit = praw.Reddit(
             client_id=REDDIT_CLIENT_ID,
@@ -211,7 +159,6 @@ def main():
 
     sub = reddit.subreddit(SUBREDDIT)
 
-    # Flair discovery (optional)
     global FLAIR_ID
     if FLAIR_TEXT and not FLAIR_ID:
         try:
@@ -223,11 +170,9 @@ def main():
         except Exception as e:
             print(f"[WARN] Could not fetch link flairs: {e}")
 
-    # 4) Post newest-first by source order (Freeman→SunStar→CDN order above)
     seen_urls = load_state()
     print(f"[STATE] Seen URLs: {len(seen_urls)}")
 
-    # Filter out already posted
     to_post = [it for it in items if it["url"] not in seen_urls]
     if not to_post:
         print("No new items to post (already seen).")
